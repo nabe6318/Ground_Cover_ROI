@@ -13,7 +13,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # ------------------------------------------------------------
 st.set_page_config(page_title="Ground Cover ROI + Scale + Grid", layout="wide")
 
-st.title("🌿 RGB画像からROI切り出し・縮尺設定・グリッド被覆率計算")
+st.markdown("### 🌿 RGB画像ROI切り出し・被覆率計算・信大雑草研作成")
 st.markdown(
     """
 RGBドローン画像から、緑色植物の被覆率を計算します。 [cite: 17]
