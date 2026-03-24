@@ -13,20 +13,21 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # ------------------------------------------------------------
 st.set_page_config(page_title="Ground Cover ROI + Scale + Grid", layout="wide")
 
-st.markdown("### 🌿 RGB画像ROI切り出し・被覆率計算・信大雑草研作成")
+# タイトルのサイズ調整
+st.markdown("### 🌿 RGB画像からROI切り出し・縮尺設定・グリッド被覆率計算")
 st.markdown(
     """
-RGBドローン画像から、緑色植物の被覆率を計算します。 [cite: 17]
+RGBドローン画像から、緑色植物の被覆率を計算します。
 
 **流れ**
 1. 元画像で **4点クリック** して ROI を切り出す（座標が表示されます）
-2. 切り出した画像で **2点クリック** して縮尺を設定  
-3. 任意サイズのグリッドで被覆率を計算し、ヒートマップ表示 [cite: 54]
+2. 切り出した画像で **2点クリック** して縮尺を設定（座標が表示されます）
+3. 任意サイズのグリッドで被覆率を計算し、ヒートマップ表示
 """
 )
 
 # ------------------------------------------------------------
-# 解析ロジック
+# 解析ロジック（論文準拠）
 # ------------------------------------------------------------
 def load_image(uploaded_file):
     img = Image.open(uploaded_file).convert("RGB")
@@ -54,7 +55,7 @@ def calc_exg(rgb):
     r, g, b = rgbf[:, :, 0], rgbf[:, :, 1], rgbf[:, :, 2]
     numerator = 2 * g - r - b
     denominator = r + g + b
-    # 論文に基づき、R=G=B=0の場合はExG=0と処理 
+    # 論文に基づき、R=G=B=0の場合はExG=0と処理 [cite: 65]
     return np.where(denominator != 0, numerator / denominator, 0.0)
 
 def calc_vari(rgb):
@@ -69,7 +70,6 @@ def make_mask_exg(rgb, exg_threshold):
 
 def make_mask_hsv(rgb, h_min, h_max, s_min, v_min):
     h, s, v = rgb_to_hsv_np(rgb)
-    # 0-255スケールのH, S, Vに対応
     h_mask = (h >= h_min) & (h <= h_max) if h_min <= h_max else (h >= h_min) | (h <= h_max)
     return h_mask & (s >= s_min) & (v >= v_min)
 
@@ -79,7 +79,7 @@ def calc_cover_rate(mask):
 
 def create_binary_image(mask):
     out = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    out[mask] = [0, 255, 0] # 植生域を緑色(255)で表現 
+    out[mask] = [0, 255, 0]
     return out
 
 def mask_to_overlay(rgb, mask, alpha=0.40):
@@ -192,17 +192,17 @@ if uploaded_file:
             st.rerun()
 
     if st.session_state.roi_points:
-        st.write("🚩 **選択座標:**")
+        st.write("🚩 **ROI 選択座標:**")
         cols = st.columns(4)
         for i, pt in enumerate(st.session_state.roi_points):
             cols[i].write(f"{i+1}点目: ({pt[0]}, {pt[1]})")
 
     c1, c2, c3 = st.columns(3)
-    if c1.button("ROIリセット"):
+    if c1.button("ROI リセット"):
         st.session_state.roi_points = []
         st.session_state.roi_canvas_key += 1
         st.rerun()
-    if len(st.session_state.roi_points) == 4 and c3.button("ROI切り出し確定"):
+    if len(st.session_state.roi_points) == 4 and c3.button("ROI 切り出し確定"):
         st.session_state.cropped_roi_image = crop_roi_by_4points(rgb_disp, st.session_state.roi_points)
         st.rerun()
 
@@ -226,7 +226,6 @@ if uploaded_file:
         binary = create_binary_image(mask)
         total_cover = calc_cover_rate(mask)
 
-        # 画像付きメトリクス表示 (復元)
         st.markdown("#### 4. ROI全体の被覆率")
         m1, m2, m3 = st.columns(3)
         m1.metric("ROI全体被覆率 (%)", f"{total_cover:.2f}")
@@ -238,7 +237,7 @@ if uploaded_file:
         i2.image(binary, caption="ROI抽出マスク", use_container_width=True)
         i3.image(overlay, caption="ROI重ね合わせ", use_container_width=True)
 
-        # --- STEP 5: Scale ---
+        # --- STEP 5: Scale Selection ---
         st.markdown("---")
         st.subheader("5. 縮尺設定（ROI上で2点クリック）")
         scale_prev = draw_points_and_lines(cropped_rgb, st.session_state.scale_points)
@@ -251,6 +250,19 @@ if uploaded_file:
                 else: st.session_state.scale_points.append(p)
                 st.session_state.scale_last_click = p
                 st.rerun()
+
+        # 縮尺座標の表示
+        if st.session_state.scale_points:
+            st.write("📐 **縮尺 選択座標:**")
+            sc_cols = st.columns(4)
+            for i, pt in enumerate(st.session_state.scale_points):
+                sc_cols[i].write(f"{i+1}点目: ({pt[0]}, {pt[1]})")
+        
+        # 縮尺リセットボタン
+        if st.button("縮尺リセット"):
+            st.session_state.scale_points = []
+            st.session_state.scale_canvas_key += 1
+            st.rerun()
 
         if len(st.session_state.scale_points) == 2:
             pix_len = pixel_distance(st.session_state.scale_points[0], st.session_state.scale_points[1])
