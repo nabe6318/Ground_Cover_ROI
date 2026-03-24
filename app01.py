@@ -14,7 +14,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 st.set_page_config(page_title="Ground Cover ROI + Scale + Grid", layout="wide")
 
 # タイトルのサイズ調整
-st.markdown("### 🌿 RGB画像の被覆率計算・信大作成O.Watanabe")
+st.markdown("### 🌿 RGB画像の被覆率計算・信大雑草研作成")
 st.markdown(
     """
 RGBドローン画像から、緑色植物の被覆率を計算します。
