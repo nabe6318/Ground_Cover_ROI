@@ -16,17 +16,17 @@ st.set_page_config(page_title="Ground Cover ROI + Scale + Grid", layout="wide")
 st.title("🌿 RGB画像からROI切り出し・縮尺設定・グリッド被覆率計算")
 st.markdown(
     """
-RGBドローン画像から、緑色植物の被覆率を計算します。
+RGBドローン画像から、緑色植物の被覆率を計算します。 [cite: 17]
 
 **流れ**
-1. 元画像で **4点クリック** して ROI を切り出す（座標が下に表示されます）
+1. 元画像で **4点クリック** して ROI を切り出す（座標が表示されます）
 2. 切り出した画像で **2点クリック** して縮尺を設定  
-3. 任意サイズのグリッドで被覆率を計算し、ヒートマップ表示
+3. 任意サイズのグリッドで被覆率を計算し、ヒートマップ表示 [cite: 54]
 """
 )
 
 # ------------------------------------------------------------
-# 解析ロジック（論文準拠 ）
+# 解析ロジック
 # ------------------------------------------------------------
 def load_image(uploaded_file):
     img = Image.open(uploaded_file).convert("RGB")
@@ -40,8 +40,7 @@ def resize_if_needed(rgb, max_size=1800):
     scale = max_size / max_edge
     new_w = int(w * scale)
     new_h = int(h * scale)
-    pil_img = Image.fromarray(rgb)
-    pil_img = pil_img.resize((new_w, new_h))
+    pil_img = Image.fromarray(rgb).resize((new_w, new_h))
     return np.array(pil_img), scale
 
 def rgb_to_hsv_np(rgb):
@@ -50,44 +49,38 @@ def rgb_to_hsv_np(rgb):
     return hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
 
 def calc_exg(rgb):
-    """
-    論文準拠の正規化ExG: (2G - R - B) / (R + G + B)
-    """
+    """論文準拠の正規化ExG: (2G - R - B) / (R + G + B) """
     rgbf = rgb.astype(np.float32) / 255.0
-    r = rgbf[:, :, 0]
-    g = rgbf[:, :, 1]
-    b = rgbf[:, :, 2]
-    
+    r, g, b = rgbf[:, :, 0], rgbf[:, :, 1], rgbf[:, :, 2]
     numerator = 2 * g - r - b
     denominator = r + g + b
-    
-    # 論文 [cite: 65] に基づき、R=G=B=0の場合はExG=0と処理
-    exg = np.where(denominator != 0, numerator / denominator, 0.0)
-    return exg
+    # 論文に基づき、R=G=B=0の場合はExG=0と処理 
+    return np.where(denominator != 0, numerator / denominator, 0.0)
 
 def calc_vari(rgb):
     rgbf = rgb.astype(np.float32) / 255.0
     r, g, b = rgbf[:, :, 0], rgbf[:, :, 1], rgbf[:, :, 2]
     denom = g + r - b
     denom = np.where(np.abs(denom) < 1e-6, np.nan, denom)
-    vari = (g - r) / denom
-    return np.nan_to_num(vari, nan=-9999)
+    return np.nan_to_num((g - r) / denom, nan=-9999)
 
 def make_mask_exg(rgb, exg_threshold):
-    exg = calc_exg(rgb)
-    return exg >= exg_threshold
+    return calc_exg(rgb) >= exg_threshold
 
 def make_mask_hsv(rgb, h_min, h_max, s_min, v_min):
     h, s, v = rgb_to_hsv_np(rgb)
-    if h_min <= h_max:
-        h_mask = (h >= h_min) & (h <= h_max)
-    else:
-        h_mask = (h >= h_min) | (h <= h_max)
+    # 0-255スケールのH, S, Vに対応
+    h_mask = (h >= h_min) & (h <= h_max) if h_min <= h_max else (h >= h_min) | (h <= h_max)
     return h_mask & (s >= s_min) & (v >= v_min)
 
 def calc_cover_rate(mask):
     if mask.size == 0: return 0.0
     return float(mask.sum()) / float(mask.size) * 100.0
+
+def create_binary_image(mask):
+    out = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+    out[mask] = [0, 255, 0] # 植生域を緑色(255)で表現 
+    return out
 
 def mask_to_overlay(rgb, mask, alpha=0.40):
     overlay = rgb.copy().astype(np.float32)
@@ -198,9 +191,8 @@ if uploaded_file:
             st.session_state.roi_last_click = p
             st.rerun()
 
-    # 座標のリアルタイム表示
     if st.session_state.roi_points:
-        st.write("🚩 **現在の選択座標:**")
+        st.write("🚩 **選択座標:**")
         cols = st.columns(4)
         for i, pt in enumerate(st.session_state.roi_points):
             cols[i].write(f"{i+1}点目: ({pt[0]}, {pt[1]})")
@@ -210,11 +202,11 @@ if uploaded_file:
         st.session_state.roi_points = []
         st.session_state.roi_canvas_key += 1
         st.rerun()
-    if len(st.session_state.roi_points) == 4 and c3.button("このROIで切り出し確定"):
+    if len(st.session_state.roi_points) == 4 and c3.button("ROI切り出し確定"):
         st.session_state.cropped_roi_image = crop_roi_by_4points(rgb_disp, st.session_state.roi_points)
         st.rerun()
 
-    # --- STEP 3-6: Analysis ---
+    # --- STEP 3-4: Analysis Result ---
     if st.session_state.cropped_roi_image is not None:
         cropped_rgb = st.session_state.cropped_roi_image
         st.markdown("---")
@@ -231,11 +223,24 @@ if uploaded_file:
             mask = make_mask_vari(cropped_rgb, vari_t)
 
         overlay = mask_to_overlay(cropped_rgb, mask)
-        st.metric("ROI全体被覆率 (%)", f"{calc_cover_rate(mask):.2f}")
-        st.image(overlay, caption="抽出プレビュー (緑色判定部)", use_container_width=True)
+        binary = create_binary_image(mask)
+        total_cover = calc_cover_rate(mask)
 
+        # 画像付きメトリクス表示 (復元)
+        st.markdown("#### 4. ROI全体の被覆率")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("ROI全体被覆率 (%)", f"{total_cover:.2f}")
+        m2.metric("緑画素数", f"{int(mask.sum()):,}")
+        m3.metric("総画素数", f"{int(mask.size):,}")
+
+        i1, i2, i3 = st.columns(3)
+        i1.image(cropped_rgb, caption="ROI元画像", use_container_width=True)
+        i2.image(binary, caption="ROI抽出マスク", use_container_width=True)
+        i3.image(overlay, caption="ROI重ね合わせ", use_container_width=True)
+
+        # --- STEP 5: Scale ---
         st.markdown("---")
-        st.subheader("5. 縮尺設定（2点クリック）")
+        st.subheader("5. 縮尺設定（ROI上で2点クリック）")
         scale_prev = draw_points_and_lines(cropped_rgb, st.session_state.scale_points)
         scale_click = streamlit_image_coordinates(Image.fromarray(scale_prev), key=f"scale_{st.session_state.scale_canvas_key}")
 
@@ -254,8 +259,8 @@ if uploaded_file:
 
             st.markdown("---")
             st.subheader("6. グリッド解析結果")
-            g1, g2 = st.columns(2)
-            g1.pyplot(create_heatmap_figure(grid_vals, f"{grid_size_m}m Grid Heatmap"))
+            res1, res2 = st.columns(2)
+            res1.pyplot(create_heatmap_figure(grid_vals, f"{grid_size_m}m Grid Heatmap"))
             st.download_button("CSVを保存", grid_df.to_csv(index=False).encode("utf-8-sig"), "result.csv")
 else:
     st.info("サイドバーから画像をアップロードしてください。")
