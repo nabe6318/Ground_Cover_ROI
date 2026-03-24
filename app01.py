@@ -11,32 +11,59 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # ------------------------------------------------------------
 # ページ設定
 # ------------------------------------------------------------
-st.set_page_config(page_title="Ground Cover Analysis (ExG Verified)", layout="wide")
+st.set_page_config(page_title="Ground Cover Analysis Tool", layout="wide")
 
-st.markdown("### 🌿 RGB画像 植被率解析アプリ（論文準拠版）")
-st.markdown("*信州大学 雑草学研究室 / 昌本ら(2023)の数式を採用*")
+st.markdown("### 🌿 RGB画像 植被率解析アプリ")
+st.markdown("*RGB画像からROIの切り出し、各種指標による植生抽出、グリッドごとの被覆率計算を行います。*")
 
 # ------------------------------------------------------------
-# 解析ロジック（論文準拠）
+# 解析ロジック（各種指標）
 # ------------------------------------------------------------
 
 def calc_exg(rgb):
-    """
-    論文  の定義式: ExG = (2G - R - B) / (R + G + B)
-    """
+    """Excess Green Index (ExG): (2G - R - B) / (R + G + B) """
     rgbf = rgb.astype(np.float32) / 255.0
     r, g, b = rgbf[:,:,0], rgbf[:,:,1], rgbf[:,:,2]
-    
     numerator = 2 * g - r - b
     denominator = r + g + b
-    
-    # 論文  に基づき、R=G=B=0（分母0）の場合は ExG=0 と処理
-    exg = np.where(denominator != 0, numerator / denominator, 0.0)
-    return exg
+    # 分母0（黒色画素）の場合は0を返す [cite: 65]
+    return np.where(denominator != 0, numerator / denominator, 0.0)
 
-def make_mask_exg(rgb, exg_threshold):
-    exg = calc_exg(rgb)
-    return exg >= exg_threshold
+def calc_vari(rgb):
+    """Visible Resistant Vegetative Index (VARI): (G - R) / (G + R - B)"""
+    rgbf = rgb.astype(np.float32) / 255.0
+    r, g, b = rgbf[:,:,0], rgbf[:,:,1], rgbf[:,:,2]
+    numerator = g - r
+    denominator = g + r - b
+    return np.where(denominator != 0, numerator / denominator, 0.0)
+
+def rgb_to_hsv_np(rgb):
+    """HSV変換 (色相・彩度・明度)"""
+    img_pil = Image.fromarray(rgb).convert("HSV")
+    hsv = np.array(img_pil).astype(np.float32)
+    return hsv[:,:,0], hsv[:,:,1], hsv[:,:,2] # H(0-255), S(0-255), V(0-255)
+
+# ------------------------------------------------------------
+# マスク作成関数
+# ------------------------------------------------------------
+
+def make_mask(rgb, method, params):
+    if method == "ExG":
+        val = calc_exg(rgb)
+        return val >= params["threshold"]
+    
+    elif method == "VARI":
+        val = calc_vari(rgb)
+        return val >= params["threshold"]
+    
+    elif method == "HSV":
+        h, s, v = rgb_to_hsv_np(rgb)
+        # Hの範囲指定（0-255スケール）
+        h_mask = (h >= params["h_min"]) & (h <= params["h_max"])
+        s_mask = s >= params["s_min"]
+        v_mask = v >= params["v_min"]
+        return h_mask & s_mask & v_mask
+    return np.zeros(rgb.shape[:2], dtype=bool)
 
 # ------------------------------------------------------------
 # 基本関数・ユーティリティ
@@ -63,7 +90,7 @@ def calc_cover_rate(mask):
 def mask_to_overlay(rgb, mask, alpha=0.40):
     overlay = rgb.copy().astype(np.float32)
     green = np.zeros_like(overlay)
-    green[:, :, 1] = 255
+    green[:, :, 1] = 255 # 判定箇所を緑色でハイライト
     overlay[mask] = overlay[mask] * (1 - alpha) + green[mask] * alpha
     return np.clip(overlay, 0, 255).astype(np.uint8)
 
@@ -89,11 +116,10 @@ def crop_roi_by_4points(rgb, points):
     y_min, y_max = max(0, int(min(ys))), min(rgb.shape[0], int(max(ys)))
     return rgb[y_min:y_max, x_min:x_max].copy()
 
-def compute_grid_cover(mask, meters_per_pixel, grid_size_m=1.0, drop_partial=False):
+def compute_grid_cover(mask, meters_per_pixel, grid_size_m=1.0):
     h, w = mask.shape
     grid_px = max(1, int(round(grid_size_m / meters_per_pixel)))
-    n_rows = h // grid_px if drop_partial else math.ceil(h / grid_px)
-    n_cols = w // grid_px if drop_partial else math.ceil(w / grid_px)
+    n_rows, n_cols = math.ceil(h / grid_px), math.ceil(w / grid_px)
     grid_values = np.full((n_rows, n_cols), np.nan)
     records = []
     for r in range(n_rows):
@@ -118,11 +144,16 @@ if "roi_points" not in st.session_state:
 st.sidebar.header("1. 解析設定")
 uploaded_file = st.sidebar.file_uploader("RGB画像をアップロード", type=["jpg", "png", "tif"])
 
-# 論文の推奨閾値をプリセットとして表示 
-st.sidebar.subheader("植生抽出パラメータ")
-veg_type = st.sidebar.radio("対象の植生（論文参照値）", ["センチピードグラス (0.10)", "ホワイトクローバー (0.19)", "カスタム"])
-default_threshold = 0.10 if "センチピード" in veg_type else 0.19 if "ホワイト" in veg_type else 0.05
-exg_t = st.sidebar.slider("ExG 閾値", -0.50, 1.00, default_threshold, 0.01)
+method = st.sidebar.selectbox("抽出指標を選択", ["ExG", "HSV", "VARI"])
+params = {}
+
+if method in ["ExG", "VARI"]:
+    params["threshold"] = st.sidebar.slider(f"{method} 閾値", -1.00, 1.00, 0.10, 0.01)
+else:
+    params["h_min"] = st.sidebar.slider("Hue 最小 (0-255)", 0, 255, 40)
+    params["h_max"] = st.sidebar.slider("Hue 最大 (0-255)", 0, 255, 90)
+    params["s_min"] = st.sidebar.slider("Saturation 最小 (0-255)", 0, 255, 30)
+    params["v_min"] = st.sidebar.slider("Value 最小 (0-255)", 0, 255, 30)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("2. 縮尺・グリッド設定")
@@ -137,8 +168,6 @@ if uploaded_file:
     rgb_disp, _ = resize_if_needed(rgb_orig)
 
     st.subheader("STEP 1: ROI（解析範囲）の指定")
-    st.info("画像上の4点をクリックして囲んでください。")
-    
     roi_view = draw_points_and_lines(rgb_disp, st.session_state.roi_points, close_polygon=True)
     roi_click = streamlit_image_coordinates(Image.fromarray(roi_view), key=f"roi_{st.session_state.roi_canvas_key}")
 
@@ -150,31 +179,31 @@ if uploaded_file:
             st.session_state.roi_last_click = curr
             st.rerun()
 
-    if st.button("ROIをリセット"):
+    col_btn1, col_btn2 = st.columns(2)
+    if col_btn1.button("ROIリセット"):
         st.session_state.roi_points = []
         st.session_state.cropped_roi_image = None
         st.session_state.roi_canvas_key += 1
         st.rerun()
 
-    if len(st.session_state.roi_points) == 4:
-        if st.button("この範囲で確定して解析進む"):
-            st.session_state.cropped_roi_image = crop_roi_by_4points(rgb_disp, st.session_state.roi_points)
-            st.rerun()
+    if len(st.session_state.roi_points) == 4 and col_btn2.button("この範囲で確定"):
+        st.session_state.cropped_roi_image = crop_roi_by_4points(rgb_disp, st.session_state.roi_points)
+        st.rerun()
 
     if st.session_state.cropped_roi_image is not None:
         cropped_rgb = st.session_state.cropped_roi_image
-        mask = make_mask_exg(cropped_rgb, exg_t)
+        mask = make_mask(cropped_rgb, method, params)
         overlay = mask_to_overlay(cropped_rgb, mask)
 
         st.markdown("---")
-        st.subheader("STEP 2: 抽出結果の確認と縮尺設定")
-        col_img, col_met = st.columns([2, 1])
+        st.subheader(f"STEP 2: 抽出結果 ({method}) と縮尺設定")
         
+        col_img, col_met = st.columns([2, 1])
         with col_img:
-            st.image(overlay, caption="緑色抽出プレビュー（緑色が判定箇所）", use_container_width=True)
+            st.image(overlay, caption="抽出プレビュー（緑色が判定箇所）", use_container_width=True)
         with col_met:
-            st.metric("ROI内 平均被覆率", f"{calc_cover_rate(mask):.2f} %")
-            st.write("次に、画像内の「1メートル」など既知の長さを2点クリックしてください。")
+            st.metric("ROI内 被覆率", f"{calc_cover_rate(mask):.2f} %")
+            st.info("画像内の「1メートル」など既知の長さを2点クリックしてください。")
 
         scale_view = draw_points_and_lines(cropped_rgb, st.session_state.scale_points)
         scale_click = streamlit_image_coordinates(Image.fromarray(scale_view), key=f"scale_{st.session_state.scale_canvas_key}")
@@ -194,22 +223,21 @@ if uploaded_file:
 
             st.markdown("---")
             st.subheader(f"STEP 3: グリッド解析結果 ({grid_size}m四方)")
-            
             res_col1, res_col2 = st.columns(2)
             
-            # グリッド重畳表示
-            img_with_grid = Image.fromarray(overlay.copy())
-            draw_g = ImageDraw.Draw(img_with_grid)
+            # グリッド描画
+            img_grid = Image.fromarray(overlay.copy())
+            draw_g = ImageDraw.Draw(img_grid)
             for x in range(0, overlay.shape[1], g_px): draw_g.line((x, 0, x, overlay.shape[0]), fill="yellow")
             for y in range(0, overlay.shape[0], g_px): draw_g.line((0, y, overlay.shape[1], y), fill="yellow")
-            res_col1.image(img_with_grid, caption="解析グリッド")
+            res_col1.image(img_grid, caption="解析グリッド")
 
-            # ヒートマップ表示
+            # ヒートマップ
             fig, ax = plt.subplots()
             im = ax.imshow(grid_vals, cmap="YlGn", vmin=0, vmax=100)
             plt.colorbar(im, label="Cover %")
             res_col2.pyplot(fig)
 
-            st.download_button("CSVで結果を保存", grid_df.to_csv(index=False).encode("utf-8-sig"), "result.csv")
+            st.download_button("結果CSVを保存", grid_df.to_csv(index=False).encode("utf-8-sig"), "result.csv")
 else:
-    st.info("サイドバーから解析したい画像をアップロードしてください。")
+    st.info("画像をアップロードしてください。")
